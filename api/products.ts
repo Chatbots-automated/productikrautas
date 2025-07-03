@@ -1,9 +1,9 @@
 // api/products.ts – Vercel Serverless Function (Node 18+)
 import type { VercelRequest, VercelResponse } from '@vercel/node'
 
-const TARGET_NAME   = 'Energy storage'   // substring to match
-const TTL_MINUTES   = 10                 // product payload cache
-const CAT_TTL_MIN   = 60                 // category-tree cache
+const TARGET_NAME   = 'Energy storage'   // substring to auto-match
+const TTL_MINUTES   = 10                 // product payload cache (min)
+const CAT_TTL_MIN   = 60                 // category-tree cache  (min)
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   console.log('--- /api/products called', new Date().toISOString())
@@ -13,19 +13,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!KENO_API_KEY) return res.status(500).json({ error: 'Missing KENO_API_KEY' })
   if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); return res.status(405).end() }
 
-  // global warm cache bucket
+  /* warm bucket */
   // @ts-ignore
   if (!globalThis.__kenoCache) globalThis.__kenoCache = {}
 
-  /* ------------------------------------------------------------------ */
-  /* 1. FETCH (or cache-hit) category tree                             */
-  /* ------------------------------------------------------------------ */
-  const catKey   = 'keno-category-tree'
-  const catCache = globalThis.__kenoCache[catKey]
+  /* -------------------------------------------------------------- */
+  /* 1. Fetch (or cache-hit) the category tree                      */
+  /* -------------------------------------------------------------- */
+  const catKey = 'keno-category-tree'
   let catsJson: any
 
-  if (catCache && Date.now() - catCache.when < CAT_TTL_MIN * 60_000) {
-    catsJson = catCache.data
+  if (globalThis.__kenoCache[catKey] &&
+      Date.now() - globalThis.__kenoCache[catKey].when < CAT_TTL_MIN * 60_000) {
+    catsJson = globalThis.__kenoCache[catKey].data
     console.log('📁 category cache hit')
   } else {
     console.time('GetProductCategories')
@@ -40,29 +40,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     globalThis.__kenoCache[catKey] = { data: catsJson, when: Date.now() }
   }
 
-  /* flatten tree for easy reading */
-  type FlatCat = { id: number; name: string; parent: number|null }
-  const flat: FlatCat[] = []
+  /* flatten + LOG every node */
+  type Flat = { id: number; name: string; parent: number|null }
+  const flat: Flat[] = []
 
   const walk = (node: any, parent: number|null) => {
-    flat.push({ id: +node.id, name: node.name, parent })
-    node.subcategories?.forEach((sub: any) => walk(sub, +node.id))
+    const entry = { id: +node.id, name: node.name, parent }
+    flat.push(entry)
+    console.log(`id ${entry.id} – ${entry.name}`)
+    node.subcategories?.forEach((sub: any) => walk(sub, entry.id))
   }
   catsJson.categories?.forEach((c: any) => walk(c, null))
 
-  /* quick log of first 30 */
-  console.log('Sample categories:', flat.slice(0, 30).map(c => `${c.id}:${c.name}`).join(' | '))
-
-  /* ------------------------------------------------------------------ */
-  /* 2. If ?categories=1, return the list and stop here                 */
-  /* ------------------------------------------------------------------ */
+  /* return tree if requested ------------------------------------- */
   if (req.query.categories === '1') {
     return res.status(200).json({ categories: flat })
   }
 
-  /* ------------------------------------------------------------------ */
-  /* 3. Determine IDs matching TARGET_NAME                              */
-  /* ------------------------------------------------------------------ */
+  /* auto-match IDs via TARGET_NAME -------------------------------- */
   const matchedIds = flat
     .filter(c => c.name.toLowerCase().includes(TARGET_NAME.toLowerCase()))
     .map(c => c.id)
@@ -70,23 +65,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   console.log(`🔍 matched IDs for "${TARGET_NAME}":`, matchedIds)
 
   if (!matchedIds.length) {
-    console.warn('❗ No IDs matched – return empty product list. Hit ?categories=1 to inspect.')
+    console.warn('❗ Nothing matched. Call ?categories=1 and pick an id.')
     return res.status(200).json({ connection_status: 'Success', products_base: [] })
   }
 
-  /* ------------------------------------------------------------------ */
-  /* 4. warm-lambda cache for product payload                           */
-  /* ------------------------------------------------------------------ */
-  const prodKey   = `keno-products-${matchedIds.join('-')}`
-  const prodCache = globalThis.__kenoCache[prodKey]
-  if (prodCache && Date.now() - prodCache.when < TTL_MINUTES * 60_000) {
+  /* -------------------------------------------------------------- */
+  /* 2. warm-lambda cache for product payload                       */
+  /* -------------------------------------------------------------- */
+  const prodKey = `keno-products-${matchedIds.join('-')}`
+  if (globalThis.__kenoCache[prodKey] &&
+      Date.now() - globalThis.__kenoCache[prodKey].when < TTL_MINUTES * 60_000) {
     console.log('⚡ product cache hit')
-    return res.setHeader('X-Data-Source', 'cache').status(200).json(prodCache.data)
+    return res
+      .setHeader('X-Data-Source', 'cache')
+      .status(200)
+      .json(globalThis.__kenoCache[prodKey].data)
   }
 
-  /* ------------------------------------------------------------------ */
-  /* 5. Fetch product base, strip to LT, filter                        */
-  /* ------------------------------------------------------------------ */
+  /* -------------------------------------------------------------- */
+  /* 3. Fetch product base, strip to LT, filter                     */
+  /* -------------------------------------------------------------- */
   console.time('GetProductBase')
   try {
     const apiRes = await fetch('https://api.wycena.keno-energy.com', {
