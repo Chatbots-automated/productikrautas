@@ -1,42 +1,36 @@
-// api/products.ts  – Vercel Serverless Function (Node 18+)
+// api/products.ts – Vercel Serverless Function
 import type { VercelRequest, VercelResponse } from '@vercel/node'
 
-const SUBCATEGORY_ID = 78          // keep only this sub-category
-const TTL_MINUTES    = 10          // warm-lambda cache
+const SUBCATEGORY_ID = 78          // current filter
+const TTL_MINUTES    = 10
 
 export default async function handler(
   req: VercelRequest,
   res: VercelResponse
 ) {
-  console.log('----- /api/products called -----', new Date().toISOString())
+  console.log('--- /api/products called', new Date().toISOString())
 
-  /* 0. env + method guards ------------------------------------------- */
+  /* env + method guards */
   const { KENO_API_KEY = '' } = process.env
-  if (!KENO_API_KEY) {
-    console.error('❌  Missing KENO_API_KEY')
+  if (!KENO_API_KEY)
     return res.status(500).json({ error: 'Missing KENO_API_KEY env var' })
-  }
   if (req.method !== 'GET') {
     res.setHeader('Allow', 'GET')
     return res.status(405).json({ error: 'Method Not Allowed' })
   }
 
-  /* 1. simple warm-lambda cache -------------------------------------- */
+  /* warm-lambda cache */
   const cacheKey = `keno-lt-${SUBCATEGORY_ID}`
-  const now      = Date.now()
-  // @ts-ignore create bucket once
+  // @ts-ignore
   if (!globalThis.__kenoCache) globalThis.__kenoCache = {}
   const cached = globalThis.__kenoCache[cacheKey]
-  if (cached && now - cached.when < TTL_MINUTES * 60e3) {
+  if (cached && Date.now() - cached.when < TTL_MINUTES * 60_000) {
     console.log('⚡ cache hit')
-    return res
-      .setHeader('X-Data-Source', 'cache')
-      .status(200)
-      .json(cached.data)
+    return res.setHeader('X-Data-Source', 'cache').status(200).json(cached.data)
   }
 
-  /* 2. fetch + filter ------------------------------------------------- */
-  console.time('KENO fetch')
+  const label = `KENO fetch ${Date.now()}`
+  console.time(label)
   try {
     const apiRes = await fetch('https://api.wycena.keno-energy.com', {
       method : 'POST',
@@ -44,35 +38,42 @@ export default async function handler(
       body   : JSON.stringify({
         apikey: KENO_API_KEY,
         method: 'GetProductBase',
-        parameters: [],
-      }),
+        parameters: []
+      })
     })
-    console.timeEnd('KENO fetch')
-    console.log('KENO HTTP:', apiRes.status)
-
-    if (!apiRes.ok) throw new Error(`KENO API ${apiRes.status}`)
+    console.timeEnd(label)
+    if (!apiRes.ok) throw new Error(`KENO ${apiRes.status}`)
     const raw = await apiRes.json()
     if (raw.errors) throw new Error(raw.errors)
 
-    let total = 0
-    const keep: any[] = []
+    /* scan & filter */
+    const counts: Record<string, number> = {}
+    const kept: any[] = []
 
     for (const p of raw.products_base as any[]) {
-      total++
+      const id = String(p.subcategory_id)
+      counts[id] = (counts[id] || 0) + 1
+
       p.description      = p.description?.lt      ?? null
       p.long_description = p.long_description?.lt ?? null
-      if (+p.subcategory_id === SUBCATEGORY_ID) keep.push(p)
+      if (+p.subcategory_id === SUBCATEGORY_ID) kept.push(p)
     }
 
-    console.log(`raw: ${total}  kept: ${keep.length}`)
-    if (keep[0]) console.log('first SKU:', keep[0].index)
+    /* diagnostics */
+    console.log('Top 20 subcategory_id counts:')
+    Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 20)
+      .forEach(([id, n]) => console.log(`  id ${id}: ${n}`))
 
-    const payload = { connection_status: raw.connection_status, products_base: keep }
-    globalThis.__kenoCache[cacheKey] = { data: payload, when: now }
+    console.log(`Kept ${kept.length} rows where subcategory_id === ${SUBCATEGORY_ID}`)
+    if (!kept.length) console.warn('❗ Pick a different ID from the list above.')
 
+    const payload = { connection_status: raw.connection_status, products_base: kept }
+    globalThis.__kenoCache[cacheKey] = { data: payload, when: Date.now() }
     return res.status(200).json(payload)
   } catch (e: any) {
-    console.error('❌  pipeline error:', e.message)
+    console.error('pipeline error:', e.message)
     return res.status(502).json({ error: e.message })
   }
 }
