@@ -2,14 +2,11 @@
   "name": "keno-products-api",
   "version": "1.0.0",
   "private": true,
-
-  // keep everything ESM so we can `export default`
   "type": "module",
-
   "engines": {
     "node": ">=18"
   },
-
+  "dependencies": {},
   "devDependencies": {
     "typescript": "^5.5.0"
   }
